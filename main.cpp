@@ -8,8 +8,6 @@
 #include "ethhdr.h"
 #include "arphdr.h"
 
-#define ATTACKER_IP "172.20.10.8" // Attacker IP
-
 #pragma pack(push, 1)
 struct EthArpPacket final {
 	EthHdr eth_;
@@ -20,7 +18,7 @@ struct EthArpPacket final {
 struct Session final {
 	Ip senderIp_;
 	Mac senderMac_;
-	Ip target Ip_;
+	Ip targetIp_;
 	Mac targetMac_;
 };
 
@@ -53,7 +51,7 @@ Mac getMac(const char* iface) {
 	return result;
 }
 
-Ip getIp(const char* interface) {
+Ip getIp(const char* iface) {
 	int fd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (fd < 0) {
 		fprintf(stderr, "socket error\n");
@@ -225,7 +223,7 @@ bool sendArpInfection(
 	return true;
 }
 
-bool relay(pcap_t* pcap, const u_char* rawPacket, bpf_u_int32 length, const Mac& attackermac, const Session& session) {
+bool relay(pcap_t* pcap, const u_char* rawPacket, bpf_u_int32 length, const Mac& attackerMac, const Session& session) {
 	u_char* packet = new u_char[length];
 	std::memcpy(packet, rawPacket, length);
 
@@ -279,7 +277,7 @@ int main(int argc, char* argv[]) {
 	Mac attackerMac = getMac(interface);
 	Ip attackerIp = getIp(interface);
 
-	if (attackerMac.isNull()| attackerIp == Ip("0.0.0.0") {
+	if (attackerMac.isNull() || attackerIp == Ip("0.0.0.0")) {
 		fprintf(stderr, "could not get Attacker information\n");
 		return 1;
 	}
@@ -298,7 +296,6 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 
-	bool allSucceeded = true;
 	
 	int sessionCount = (argc - 2) / 2;
 	Session* sessions = new Session[sessionCount];
@@ -321,7 +318,12 @@ int main(int argc, char* argv[]) {
 	}
 
 	for (int i = 0; i < sessionCount; ++i) { 
-		if (!infect(pcap, attackerMac, sessions[i])) { 
+		if (!sendArpInfection(
+				pcap,
+				attackerMac,
+				sessions[i].senderMac_,
+				sessions[i].senderIp_,
+				sessions[i].targetIp_)) {
 			delete[] sessions;
 			pcap_close(pcap); 
 			return 1;
@@ -379,11 +381,16 @@ int main(int argc, char* argv[]) {
 
 		for (int i = 0; i < sessionCount; ++i) {
 			if (isRecoveryPacket(arpPacket, attackerMac, sessions[i]))
-				infect(pcap, attackerMac, sessions[i]); 	
+				sendArpInfection(
+					pcap,
+					attackerMac,
+					sessions[i].senderMac_,
+					sessions[i].senderIp_,
+					sessions[i].targetIp_);
 		}
 	}
 
 	delete[] sessions;
 	pcap_close(pcap);
-	return allSucceeded ? 0 : 1;
+	return 0;
 }
